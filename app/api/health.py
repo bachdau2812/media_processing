@@ -17,4 +17,8 @@ async def ready(request: Request) -> JSONResponse:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"status": "not_ready"},
         )
-    return JSONResponse(content={"status": "ready", "device": services.device})
+    device = services.device
+    device_name = getattr(device, "type", None)
+    return JSONResponse(
+        content={"status": "ready", "device": str(device_name or device)}
+    )

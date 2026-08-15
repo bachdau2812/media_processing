@@ -1,5 +1,6 @@
 import httpx
 import pytest
+import torch
 
 from app.config import Settings
 from app.main import create_app
@@ -51,3 +52,17 @@ async def test_readiness_includes_selected_device_when_ready():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready", "device": "cpu"}
+
+
+@pytest.mark.asyncio
+async def test_readiness_serializes_torch_device():
+    app = create_app(Settings(), FakeReadiness(ready=True, device=torch.device("cpu")))
+
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json()["device"] == "cpu"
