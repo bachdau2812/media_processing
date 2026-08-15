@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+APP_ROOT = ROOT.parent
 
 
 def compact(path: Path) -> str:
@@ -36,3 +37,13 @@ def test_env_example_contains_runtime_settings_only() -> None:
     assert "SENSITIVE_CHECKER_IMAGE" not in env_example
     assert "SERVICE_HOST=127.0.0.1" in env_example
     assert "MUSIC_ARTIFACT_MAX_SIZE=104857600" in env_example
+
+
+def test_parent_workspace_does_not_own_media_processing_compose() -> None:
+    for relative_path in (
+        "compose.yaml",
+        "compose.gpu.yaml",
+        ".env.deploy.example",
+        "docs/architecture/python-media-service-runbook.md",
+    ):
+        assert not (APP_ROOT / relative_path).exists()
