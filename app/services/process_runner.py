@@ -1,26 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-import re
 import signal
+import time
 from dataclasses import dataclass
+
+from app.logging_utils import sanitize_log_text
 
 
 _DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
 _READ_CHUNK_BYTES = 8192
-_ACCESS_TOKEN = re.compile(
-    r"(?i)(access\s+token\s+acquired\s*:\s*)\S+"
-)
-_SENSITIVE_HEADER = re.compile(
-    r"(?im)^(set-cookie|cookie|authorization)\s*:\s*.*$"
-)
-_SENSITIVE_HEADER_TUPLE = re.compile(
-    r"(?i)\(b?'(set-cookie|cookie|authorization)',\s*b?'[^']*'\)"
-)
-_SENSITIVE_HEADER_TUPLE_TAIL = re.compile(
-    r"(?is)\(b?'(set-cookie|cookie|authorization)',\s*b?'.*\Z"
-)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -46,6 +39,15 @@ class ProcessRunner:
 
     async def run(self, request: ProcessRequest) -> ProcessResult:
         self._validate(request)
+        started_at = time.monotonic()
+        logger.info(
+            "music_process_started label=%s track_id=%s job_id=%s "
+            "timeout_seconds=%s",
+            request.label,
+            request.track_id,
+            request.job_id,
+            request.timeout_seconds,
+        )
         environment = os.environ.copy()
         environment["PYTHONUTF8"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
@@ -68,7 +70,16 @@ class ProcessRunner:
                 )
             except TimeoutError as error:
                 await self._terminate(process)
-                await output_task
+                output = await output_task
+                logger.warning(
+                    "music_process_timed_out label=%s track_id=%s job_id=%s "
+                    "elapsed_ms=%s output=%r",
+                    request.label,
+                    request.track_id,
+                    request.job_id,
+                    _elapsed_ms(started_at),
+                    sanitize_log_text(output, self._max_output_bytes),
+                )
                 raise TimeoutError(
                     f"{request.label} timed out after "
                     f"{request.timeout_seconds} seconds"
@@ -76,12 +87,44 @@ class ProcessRunner:
             except asyncio.CancelledError:
                 await self._terminate(process)
                 await output_task
+                logger.info(
+                    "music_process_cancelled label=%s track_id=%s job_id=%s "
+                    "elapsed_ms=%s",
+                    request.label,
+                    request.track_id,
+                    request.job_id,
+                    _elapsed_ms(started_at),
+                )
                 raise
 
             output = await output_task
+            sanitized_output = sanitize_log_text(
+                output, self._max_output_bytes
+            )
+            if process.returncode == 0:
+                logger.info(
+                    "music_process_completed label=%s track_id=%s job_id=%s "
+                    "exit_code=%s elapsed_ms=%s",
+                    request.label,
+                    request.track_id,
+                    request.job_id,
+                    process.returncode,
+                    _elapsed_ms(started_at),
+                )
+            else:
+                logger.warning(
+                    "music_process_failed label=%s track_id=%s job_id=%s "
+                    "exit_code=%s elapsed_ms=%s output=%r",
+                    request.label,
+                    request.track_id,
+                    request.job_id,
+                    process.returncode,
+                    _elapsed_ms(started_at),
+                    sanitized_output,
+                )
             return ProcessResult(
                 exit_code=process.returncode,
-                output=self._sanitize_and_cap(output),
+                output=sanitized_output,
             )
         finally:
             if process.returncode is None:
@@ -126,20 +169,6 @@ class ProcessRunner:
         except ProcessLookupError:
             pass
 
-    def _sanitize_and_cap(self, output: bytes) -> str:
-        decoded = output.decode("utf-8", errors="replace")
-        sanitized = _ACCESS_TOKEN.sub(r"\1[REDACTED]", decoded)
-        sanitized = _SENSITIVE_HEADER_TUPLE.sub(
-            r"\1=[REDACTED]", sanitized
-        )
-        sanitized = _SENSITIVE_HEADER_TUPLE_TAIL.sub(
-            r"\1=[REDACTED]", sanitized
-        )
-        sanitized = _SENSITIVE_HEADER.sub(r"\1=[REDACTED]", sanitized)
-        return sanitized.encode("utf-8")[: self._max_output_bytes].decode(
-            "utf-8", errors="ignore"
-        )
-
     def _validate(self, request: ProcessRequest) -> None:
         if not request.argv or any(not argument for argument in request.argv):
             raise ValueError("CLI command and arguments are required")
@@ -147,3 +176,7 @@ class ProcessRunner:
             raise ValueError("CLI timeout must be greater than zero")
         if not request.label or not request.track_id or not request.job_id:
             raise ValueError("CLI logging context is required")
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, round((time.monotonic() - started_at) * 1000))

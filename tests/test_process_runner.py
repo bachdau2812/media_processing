@@ -1,3 +1,4 @@
+import logging
 import sys
 
 import pytest
@@ -129,3 +130,52 @@ async def test_process_runner_redacts_unterminated_sensitive_tuple_at_cap(
     assert "boundary" not in result.output
     assert f"{header}=[REDACTED]" in result.output
     assert len(result.output.encode("utf-8")) <= 64
+
+
+@pytest.mark.asyncio
+async def test_process_runner_logs_safe_lifecycle_without_argv(caplog):
+    runner = ProcessRunner()
+    secret_argument = "argument-must-not-be-logged"
+
+    with caplog.at_level(
+        logging.INFO, logger="app.services.process_runner"
+    ):
+        result = await runner.run(
+            request_for(
+                sys.executable,
+                "-c",
+                "print('ok')",
+                secret_argument,
+            )
+        )
+
+    assert result.exit_code == 0
+    assert "music_process_started" in caplog.text
+    assert "music_process_completed" in caplog.text
+    assert "label=test-process" in caplog.text
+    assert "job_id=00000000-0000-0000-0000-000000000001" in caplog.text
+    assert "exit_code=0" in caplog.text
+    assert "elapsed_ms=" in caplog.text
+    assert secret_argument not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_process_runner_logs_only_sanitized_output_on_failure(caplog):
+    runner = ProcessRunner()
+    payload = "Authorization: Bearer failure-secret"
+
+    with caplog.at_level(
+        logging.INFO, logger="app.services.process_runner"
+    ):
+        result = await runner.run(
+            request_for(
+                sys.executable,
+                "-c",
+                f"import sys; print({payload!r}); sys.exit(7)",
+            )
+        )
+
+    assert result.exit_code == 7
+    assert "music_process_failed" in caplog.text
+    assert "authorization=[redacted]" in caplog.text.lower()
+    assert "failure-secret" not in caplog.text
