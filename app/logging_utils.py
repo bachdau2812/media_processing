@@ -37,4 +37,3 @@ def sanitize_log_text(
     return sanitized.encode("utf-8")[:maximum_bytes].decode(
         "utf-8", errors="ignore"
     )
-
