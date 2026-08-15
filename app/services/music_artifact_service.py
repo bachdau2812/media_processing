@@ -54,7 +54,9 @@ class MusicArtifactService:
         metadata_reader: MetadataReaderLike,
         artifact_store: ArtifactStoreLike,
     ) -> None:
-        self._root = Path(settings.artifact_root).absolute()
+        configured_root = Path(settings.artifact_root)
+        configured_root.mkdir(parents=True, exist_ok=True)
+        self._root = configured_root.resolve(strict=True)
         self._downloader = downloader
         self._metadata_reader = metadata_reader
         self._artifact_store = artifact_store
@@ -75,9 +77,6 @@ class MusicArtifactService:
             raise MusicCapacityExceeded from error
 
         try:
-            await asyncio.to_thread(
-                self._root.mkdir, parents=True, exist_ok=True
-            )
             job_directory = self._root / str(uuid4())
             try:
                 audio_path = await self._downloader.download(

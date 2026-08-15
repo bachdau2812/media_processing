@@ -14,6 +14,15 @@ from app.services.music_artifact_service import (
 TRACK_ID = "1234567890123456789012"
 
 
+def symlink_directory_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows account cannot create symbolic links")
+        raise
+
+
 class FakeDownloader:
     def __init__(self, events: list[str], content: bytes = b"flac") -> None:
         self.events = events
@@ -111,6 +120,29 @@ async def test_failed_metadata_removes_only_unregistered_uuid_job(
 
     assert (protected / "keep.txt").read_text() == "keep"
     assert [entry.name for entry in artifact_root.iterdir()] == ["protected"]
+    assert events == ["download", "metadata"]
+
+
+@pytest.mark.asyncio
+async def test_failed_metadata_cleans_uuid_job_through_symlinked_root(
+    tmp_path: Path,
+):
+    real_root = tmp_path / "real-artifacts"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-artifacts"
+    symlink_directory_or_skip(linked_root, real_root)
+    events: list[str] = []
+    service = MusicArtifactService(
+        settings(tmp_path, artifact_root=linked_root),
+        FakeDownloader(events),
+        FakeMetadataReader(events, RuntimeError("metadata failed")),
+        FakeArtifactStore(events),
+    )
+
+    with pytest.raises(RuntimeError, match="metadata failed"):
+        await service.create(TRACK_ID)
+
+    assert list(real_root.iterdir()) == []
     assert events == ["download", "metadata"]
 
 
