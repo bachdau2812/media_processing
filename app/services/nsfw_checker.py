@@ -87,7 +87,7 @@ class NsfwChecker:
         highest_yolo_confidence = 0.0
         for box in boxes:
             confidence = float(box.conf[0])
-            if round(confidence, 4) < 0.45:
+            if confidence < 0.45:
                 continue
             class_name = self.yolo_model.names[int(box.cls[0])]
             coordinates = list(map(int, box.xyxy[0].tolist()))

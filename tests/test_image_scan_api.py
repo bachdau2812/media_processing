@@ -124,7 +124,7 @@ class FakeClassifier:
 
 class FakeBox:
     def __init__(self, class_index: int, confidence: float) -> None:
-        self.conf = torch.tensor([confidence])
+        self.conf = [confidence]
         self.cls = torch.tensor([class_index])
         self.xyxy = torch.tensor([[1, 2, 30, 40]])
 
@@ -188,6 +188,24 @@ def test_nsfw_checker_blocks_banned_part_at_existing_confidence(tmp_path: Path):
         "detections": [
             {"part": "nipple", "bbox": [1, 2, 30, 40], "confidence": 0.45}
         ],
+    }
+
+
+def test_nsfw_checker_ignores_banned_part_just_below_confidence_threshold(
+    tmp_path: Path,
+):
+    service = checker(
+        {"porn": 0.1, "hentai": 0.1, "sexy": 0.2, "neutral": 0.6},
+        FakeYolo([FakeBox(0, 0.44996)]),
+    )
+
+    result = service.evaluate(image_file(tmp_path))
+
+    assert result == {
+        "is_nsfw": False,
+        "highest_risk_score": 0.1,
+        "reason": "safe_neutral",
+        "detections": [],
     }
 
 
