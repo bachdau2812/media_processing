@@ -19,5 +19,6 @@ class Settings(BaseSettings):
     music_capacity_wait_seconds: PositiveInt = 1
     music_cleanup_interval_seconds: PositiveInt = 60
     image_upload_max_size: PositiveInt = 100 * 1024 * 1024
+    image_scan_temp_root: Path = Path("/tmp/sensitive-checker/images")
     yolo_model_path: Path = Path("models/erax_nsfw_yolo11m.pt")
     vit_model_name: str = "AdamCodd/vit-base-nsfw-detector"

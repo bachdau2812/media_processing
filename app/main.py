@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
@@ -9,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.health import router as health_router
+from app.api.image_scan import router as image_scan_router
 from app.api.music_artifacts import MusicArtifactNotFound
 from app.api.music_artifacts import router as music_artifact_router
 from app.config import Settings
@@ -19,6 +21,8 @@ from app.services.music_artifact_service import (
     MusicFetchTimeout,
     MusicProviderFailed,
 )
+from app.services.device import select_device
+from app.services.nsfw_checker import NsfwChecker
 
 
 @asynccontextmanager
@@ -31,6 +35,12 @@ def create_app(settings: Settings, services: Any) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.settings = settings
         app.state.services = services
+        if getattr(services, "nsfw_checker", False) is None:
+            device = select_device(settings.compute_device)
+            services.device = device
+            services.nsfw_checker = await asyncio.to_thread(
+                NsfwChecker.load, settings, device
+            )
         async with _lifespan(app):
             yield
 
@@ -124,12 +134,17 @@ def create_app(settings: Settings, services: Any) -> FastAPI:
         )
 
     app.include_router(health_router)
+    app.include_router(image_scan_router)
     app.include_router(music_artifact_router)
     return app
 
 
 def create_uninitialized_services() -> SimpleNamespace:
-    return SimpleNamespace(ready=False, device="uninitialized")
+    return SimpleNamespace(
+        ready=False,
+        device="uninitialized",
+        nsfw_checker=None,
+    )
 
 
 def _problem_response(
