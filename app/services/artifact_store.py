@@ -29,6 +29,14 @@ def require_beneath_root(root: Path, candidate: Path) -> Path:
     return resolved
 
 
+def _is_symlink_or_reparse_point(file_stat: os.stat_result) -> bool:
+    file_attributes = getattr(file_stat, "st_file_attributes", 0)
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return stat.S_ISLNK(file_stat.st_mode) or bool(
+        file_attributes & reparse_attribute
+    )
+
+
 def _require_safe_components(
     root: Path, candidate: Path, *, allow_missing: bool
 ) -> Path:
@@ -47,8 +55,7 @@ def _require_safe_components(
             if allow_missing:
                 break
             raise
-        is_junction = getattr(current, "is_junction", lambda: False)()
-        if stat.S_ISLNK(component_stat.st_mode) or is_junction:
+        if _is_symlink_or_reparse_point(component_stat):
             raise ValueError("Artifact path contains a symlink component")
 
     return require_beneath_root(root, absolute_candidate)
@@ -127,8 +134,7 @@ def _remove_stale_job_directories(
             candidate_stat = candidate.lstat()
         except FileNotFoundError:
             continue
-        is_junction = getattr(candidate, "is_junction", lambda: False)()
-        if stat.S_ISLNK(candidate_stat.st_mode) or is_junction:
+        if _is_symlink_or_reparse_point(candidate_stat):
             continue
         if not stat.S_ISDIR(candidate_stat.st_mode):
             continue

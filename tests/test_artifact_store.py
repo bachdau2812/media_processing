@@ -1,4 +1,7 @@
 import hashlib
+import os
+import stat
+import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -107,6 +110,32 @@ async def test_register_rejects_symlinked_job_directory_inside_root(
 
     with pytest.raises(ValueError, match="symlink"):
         await store.register(TRACK_ID, linked_job / "song.flac", MusicMetadata())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NTFS junction regression")
+@pytest.mark.asyncio
+async def test_register_rejects_junction_without_path_is_junction(
+    tmp_path: Path, clock, monkeypatch
+):
+    root = tmp_path / "artifacts"
+    real_job = root / "real-job"
+    real_job.mkdir(parents=True)
+    audio = real_job / "song.flac"
+    audio.write_bytes(b"audio")
+    junction = root / "junction-job"
+    subprocess.run(
+        ("cmd", "/d", "/c", "mklink", "/J", str(junction), str(real_job)),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    junction_stat = os.lstat(junction)
+    assert junction_stat.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    monkeypatch.delattr(Path, "is_junction", raising=False)
+    store = ArtifactStore(root, 100 * 1024 * 1024, 900, clock)
+
+    with pytest.raises(ValueError, match="symlink"):
+        await store.register(TRACK_ID, junction / "song.flac", MusicMetadata())
 
 
 @pytest.mark.asyncio
