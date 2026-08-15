@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from app.services.music_artifact_service import (
 
 
 TRACK_ID = "1234567890123456789012"
+REQUEST_ID = "10000000-0000-0000-0000-000000000001"
 
 
 def symlink_directory_or_skip(link: Path, target: Path) -> None:
@@ -91,12 +93,58 @@ async def test_create_downloads_reads_metadata_then_registers(tmp_path: Path):
         FakeArtifactStore(events),
     )
 
-    response = await service.create(TRACK_ID)
+    response = await service.create(TRACK_ID, REQUEST_ID)
 
     assert events == ["download", "metadata", "register"]
     assert response.track_id == TRACK_ID
     assert response.metadata.genre == "Rock"
     assert response.size_bytes == len(b"flac")
+
+
+@pytest.mark.asyncio
+async def test_create_logs_correlated_music_fetch_stages(
+    tmp_path: Path,
+    caplog,
+):
+    events: list[str] = []
+    service = MusicArtifactService(
+        settings(tmp_path),
+        FakeDownloader(events),
+        FakeMetadataReader(events),
+        FakeArtifactStore(events),
+    )
+
+    with caplog.at_level(
+        logging.INFO,
+        logger="app.services.music_artifact_service",
+    ):
+        response = await service.create(TRACK_ID, REQUEST_ID)
+
+    expected_events = (
+        "music_fetch_started",
+        "music_capacity_acquired",
+        "music_job_created",
+        "music_download_started",
+        "music_download_completed",
+        "music_metadata_started",
+        "music_metadata_completed",
+        "music_artifact_registered",
+    )
+    matching_messages = []
+    for event in expected_events:
+        assert event in caplog.text
+        matching_messages.append(
+            next(
+                index
+                for index, record in enumerate(caplog.records)
+                if event in record.getMessage()
+            )
+        )
+    assert matching_messages == sorted(matching_messages)
+    assert f"request_id={REQUEST_ID}" in caplog.text
+    assert f"track_id={TRACK_ID}" in caplog.text
+    assert f"artifact_id={response.artifact_id}" in caplog.text
+    assert str(tmp_path.resolve()) not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -116,7 +164,7 @@ async def test_failed_metadata_removes_only_unregistered_uuid_job(
     )
 
     with pytest.raises(RuntimeError, match="raw CLI secret"):
-        await service.create(TRACK_ID)
+        await service.create(TRACK_ID, REQUEST_ID)
 
     assert (protected / "keep.txt").read_text() == "keep"
     assert [entry.name for entry in artifact_root.iterdir()] == ["protected"]
@@ -140,7 +188,7 @@ async def test_failed_metadata_cleans_uuid_job_through_symlinked_root(
     )
 
     with pytest.raises(RuntimeError, match="metadata failed"):
-        await service.create(TRACK_ID)
+        await service.create(TRACK_ID, REQUEST_ID)
 
     assert list(real_root.iterdir()) == []
     assert events == ["download", "metadata"]
@@ -165,11 +213,11 @@ async def test_capacity_wait_is_bounded(tmp_path: Path):
         FakeMetadataReader(events),
         FakeArtifactStore(events),
     )
-    first = asyncio.create_task(service.create(TRACK_ID))
+    first = asyncio.create_task(service.create(TRACK_ID, REQUEST_ID))
     await started.wait()
 
     with pytest.raises(MusicCapacityExceeded):
-        await service.create(TRACK_ID)
+        await service.create(TRACK_ID, REQUEST_ID)
 
     release.set()
     await first

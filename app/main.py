@@ -16,6 +16,7 @@ from app.api.music_artifacts import MusicArtifactNotFound
 from app.api.music_artifacts import router as music_artifact_router
 from app.config import Settings
 from app.errors import ApiProblem
+from app.logging_utils import sanitize_log_text
 from app.services.artifact_store import ArtifactStore
 from app.services.ffprobe_metadata import FfprobeMetadataReader
 from app.services.music_artifact_service import (
@@ -32,6 +33,7 @@ from app.services.spotiflac_downloader import SpotiFlacDownloader
 
 
 logger = logging.getLogger(__name__)
+_ERROR_LOG_MAX_BYTES = 4096
 
 
 @asynccontextmanager
@@ -137,6 +139,13 @@ def create_app(settings: Settings, services: Any) -> FastAPI:
         )
 
     async def provider_handler(request, error):
+        cause = error.__cause__ or error
+        logger.error(
+            "music_provider_failed request_id=%s error_type=%s detail=%r",
+            request.state.request_id,
+            type(cause).__name__,
+            sanitize_log_text(str(error), _ERROR_LOG_MAX_BYTES),
+        )
         return _problem_response(
             request,
             502,

@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,8 +27,10 @@ class FakeMusicService:
     def __init__(self, response=None, error: Exception | None = None) -> None:
         self.response = response
         self.error = error
+        self.requests: list[tuple[str, str | None]] = []
 
-    async def create(self, track_id: str):
+    async def create(self, track_id: str, request_id: str | None = None):
+        self.requests.append((track_id, request_id))
         if self.error:
             raise self.error
         return self.response
@@ -112,6 +115,28 @@ async def test_post_returns_exact_camel_case_contract(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_post_passes_response_request_id_to_music_service(
+    tmp_path: Path,
+):
+    music_service = FakeMusicService(response_model())
+    app = create_app(
+        Settings(artifact_root=tmp_path),
+        services(music_service, FakeStore(None)),
+    )
+
+    response = await request(
+        app,
+        "POST",
+        "/api/v1/music/artifacts",
+        json={"trackId": TRACK_ID},
+    )
+
+    assert music_service.requests == [
+        (TRACK_ID, response.headers["x-request-id"])
+    ]
+
+
+@pytest.mark.asyncio
 async def test_invalid_track_id_returns_safe_400(tmp_path: Path):
     app = create_app(Settings(artifact_root=tmp_path), services(FakeMusicService(), FakeStore(None)))
 
@@ -159,6 +184,34 @@ async def test_post_maps_expected_failures_to_safe_problems(
     assert_problem(response, status, code)
     assert "raw" not in response.text
     assert "secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_logs_sanitized_detail_and_request_id(
+    tmp_path: Path,
+    caplog,
+):
+    error = MusicProviderFailed(
+        "provider failed: Authorization: Bearer provider-secret"
+    )
+    app = create_app(
+        Settings(artifact_root=tmp_path),
+        services(FakeMusicService(error=error), FakeStore(None)),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.main"):
+        response = await request(
+            app,
+            "POST",
+            "/api/v1/music/artifacts",
+            json={"trackId": TRACK_ID},
+        )
+
+    assert_problem(response, 502, "MUSIC_PROVIDER_FAILED")
+    assert "music_provider_failed" in caplog.text
+    assert response.headers["x-request-id"] in caplog.text
+    assert "authorization=[redacted]" in caplog.text.lower()
+    assert "provider-secret" not in caplog.text
 
 
 @pytest.mark.asyncio

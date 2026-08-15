@@ -5,15 +5,18 @@ import logging
 import os
 import shutil
 import stat
+import time
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid4
 
 from app.config import Settings
+from app.logging_utils import sanitize_log_text
 from app.models.music_artifact import MusicArtifactResponse, MusicMetadata
 
 
 logger = logging.getLogger(__name__)
+_ERROR_LOG_MAX_BYTES = 4096
 
 
 class DownloaderLike(Protocol):
@@ -67,25 +70,103 @@ class MusicArtifactService:
             settings.music_max_concurrent_downloads
         )
 
-    async def create(self, track_id: str) -> MusicArtifactResponse:
+    async def create(
+        self,
+        track_id: str,
+        request_id: str,
+    ) -> MusicArtifactResponse:
+        started_at = time.monotonic()
+        stage = "capacity_wait"
+        job_id = "unassigned"
+        logger.info(
+            "music_fetch_started request_id=%s track_id=%s",
+            request_id,
+            track_id,
+        )
         try:
             await asyncio.wait_for(
                 self._capacity.acquire(),
                 timeout=self._capacity_wait_seconds,
             )
         except TimeoutError as error:
+            logger.warning(
+                "music_capacity_exceeded request_id=%s track_id=%s "
+                "elapsed_ms=%s",
+                request_id,
+                track_id,
+                _elapsed_ms(started_at),
+            )
             raise MusicCapacityExceeded from error
 
+        logger.info(
+            "music_capacity_acquired request_id=%s track_id=%s",
+            request_id,
+            track_id,
+        )
         try:
             job_directory = self._root / str(uuid4())
+            job_id = job_directory.name
+            logger.info(
+                "music_job_created request_id=%s track_id=%s job_id=%s",
+                request_id,
+                track_id,
+                job_id,
+            )
             try:
+                stage = "download"
+                logger.info(
+                    "music_download_started request_id=%s track_id=%s "
+                    "job_id=%s",
+                    request_id,
+                    track_id,
+                    job_id,
+                )
                 audio_path = await self._downloader.download(
                     track_id, job_directory
                 )
+                audio_size = await asyncio.to_thread(
+                    _file_size, audio_path
+                )
+                logger.info(
+                    "music_download_completed request_id=%s track_id=%s "
+                    "job_id=%s filename=%r size_bytes=%s",
+                    request_id,
+                    track_id,
+                    job_id,
+                    audio_path.name,
+                    audio_size,
+                )
+                stage = "metadata"
+                logger.info(
+                    "music_metadata_started request_id=%s track_id=%s "
+                    "job_id=%s",
+                    request_id,
+                    track_id,
+                    job_id,
+                )
                 metadata = await self._metadata_reader.read(audio_path)
-                return await self._artifact_store.register(
+                logger.info(
+                    "music_metadata_completed request_id=%s track_id=%s "
+                    "job_id=%s",
+                    request_id,
+                    track_id,
+                    job_id,
+                )
+                stage = "registration"
+                response = await self._artifact_store.register(
                     track_id, audio_path, metadata
                 )
+                logger.info(
+                    "music_artifact_registered request_id=%s track_id=%s "
+                    "job_id=%s artifact_id=%s size_bytes=%s elapsed_ms=%s",
+                    request_id,
+                    track_id,
+                    job_id,
+                    response.artifact_id,
+                    response.size_bytes,
+                    _elapsed_ms(started_at),
+                )
+                return response
             except BaseException as error:
                 try:
                     await asyncio.to_thread(
@@ -96,8 +177,19 @@ class MusicArtifactService:
                 except Exception:
                     logger.exception(
                         "Failed to clean unregistered music job %s",
-                        job_directory.name,
+                        job_id,
                     )
+                logger.warning(
+                    "music_fetch_failed request_id=%s track_id=%s job_id=%s "
+                    "stage=%s error_type=%s elapsed_ms=%s detail=%r",
+                    request_id,
+                    track_id,
+                    job_id,
+                    stage,
+                    type(error).__name__,
+                    _elapsed_ms(started_at),
+                    sanitize_log_text(str(error), _ERROR_LOG_MAX_BYTES),
+                )
                 if isinstance(error, TimeoutError):
                     raise MusicFetchTimeout(str(error)) from error
                 if isinstance(error, ValueError) and _is_too_large(error):
@@ -112,6 +204,14 @@ class MusicArtifactService:
 def _is_too_large(error: ValueError) -> bool:
     message = str(error).lower()
     return "exceed" in message and "size" in message
+
+
+def _file_size(path: Path) -> int:
+    return path.lstat().st_size
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, round((time.monotonic() - started_at) * 1000))
 
 
 def _remove_guarded_uuid_directory(root: Path, candidate: Path) -> None:

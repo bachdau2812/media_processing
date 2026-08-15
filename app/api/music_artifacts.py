@@ -26,7 +26,8 @@ async def create_artifact(
     request: MusicArtifactCreateRequest, http_request: Request
 ) -> MusicArtifactResponse:
     return await http_request.app.state.services.music_artifact_service.create(
-        request.track_id
+        request.track_id,
+        http_request.state.request_id,
     )
 
 
