@@ -1,0 +1,18 @@
+import uvicorn
+
+from app.config import Settings
+from app.main import create_app, create_uninitialized_services
+
+
+def main() -> None:
+    settings = Settings()
+    uvicorn.run(
+        create_app(settings, create_uninitialized_services()),
+        host=settings.service_host,
+        port=settings.service_port,
+        workers=1,
+    )
+
+
+if __name__ == "__main__":
+    main()
