@@ -1,31 +1,55 @@
 # Sensitive Checker media service
 
-FastAPI service for image moderation and temporary SpotiFLAC music artifacts. The default image runs inference on CPU; the GPU target uses PyTorch CUDA 13.0 wheels. Both targets run one Uvicorn worker as a non-root user and keep generated music in a named Docker volume.
+FastAPI service for image moderation and temporary SpotiFLAC music artifacts. The Dockerfile provides CPU and GPU runtime targets; both run one Uvicorn worker as a non-root user.
 
-## Start the service
+## Build and run locally
 
-Copy `.env.example` to `.env` if you need to change a default. On the Linux server, run the CPU image with:
+Copy `.env.example` to `.env` when overriding runtime defaults.
 
-```bash
-docker compose up -d --build
-```
-
-For an NVIDIA server with a compatible driver and NVIDIA Container Toolkit:
+CPU:
 
 ```bash
-docker compose -f compose.yaml -f compose.gpu.yaml up -d --build
+docker build --target runtime-cpu -t media_processing:local .
+docker run --rm \
+  --network host \
+  --env-file .env \
+  -v media_processing_artifacts:/var/lib/sensitive-checker/music \
+  media_processing:local
 ```
 
-Follow startup and download logs with:
+GPU requires a compatible NVIDIA driver and NVIDIA Container Toolkit:
 
 ```bash
-docker compose logs -f sensitive-checker
+docker build --target runtime-gpu -t media_processing:gpu .
+docker run --rm \
+  --network host \
+  --gpus all \
+  --env-file .env \
+  -e COMPUTE_DEVICE=cuda \
+  -v media_processing_artifacts:/var/lib/sensitive-checker/music \
+  media_processing:gpu
 ```
 
-The service uses host networking and publishes no Docker ports. It binds to `127.0.0.1:8000` by default, so another host-network container can call `http://127.0.0.1:8000`. Check readiness at `GET /health/ready` and liveness at `GET /health/live`.
+The safe default binds to `127.0.0.1:8000`. Check `GET /health/live` and `GET /health/ready`. Do not set `SERVICE_HOST=0.0.0.0` on an Internet-reachable host without a firewall or protected authenticated reverse proxy.
 
-The music artifact limit is `104857600` bytes (100 MiB). The `sensitive-checker-artifacts` volume retains temporary files across container replacement; startup cleanup and the TTL sweeper remove stale jobs. If `ARTIFACT_ROOT` is changed, update the volume target to the same path.
+The music artifact limit is `104857600` bytes (100 MiB). Startup cleanup and the TTL sweeper remove stale jobs from `ARTIFACT_ROOT`.
 
-Do not set `SERVICE_HOST=0.0.0.0` on an Internet-reachable host without a firewall, authentication, rate limiting, or a protected reverse proxy. The music endpoint can start expensive external downloads.
+## CI/CD
 
-For reproducible promotion, push the built image to your registry and deploy the approved immutable digest, for example `registry.example/sensitive-checker@sha256:<digest>`, through `SENSITIVE_CHECKER_IMAGE`.
+A push to `main` runs `.github/workflows/deploy.yml`. It publishes:
+
+- `${DOCKERHUB_USERNAME}/media_processing:latest`
+- `${DOCKERHUB_USERNAME}/media_processing:<git-sha>`
+
+The workflow builds `runtime-cpu` by default. Set the GitHub repository variable `MEDIA_PROCESSING_DOCKER_TARGET=runtime-gpu` when the server-side Compose service is already configured with GPU access and `COMPUTE_DEVICE=cuda`.
+
+Required GitHub secrets:
+
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_PASSWORD`
+- `SERVER_SSH_KEY`
+- `SERVER_HOST`
+- `SERVER_PORT`
+- `SERVER_USER`
+
+Deployment reuses the operator-owned Compose project at `/data/bachdd/ins_clone-deploy`, the environment file `../environment_variable/.env.backend`, and recreates only the `media_processing` service. This repository intentionally contains no Compose file.

@@ -59,27 +59,3 @@ def test_entrypoint_uses_configured_host_and_one_worker() -> None:
 
     assert "host=settings.service_host" in compact(entrypoint)
     assert "workers=1" in compact(entrypoint)
-
-
-def test_cpu_compose_uses_host_network_without_port_publication() -> None:
-    compose = read("compose.yaml")
-    normalized = compact(compose)
-
-    assert "target:runtime-cpu" in normalized
-    assert "network_mode:host" in normalized
-    assert "ports:" not in compose
-    assert "SERVICE_HOST:${SERVICE_HOST:-127.0.0.1}" in normalized
-    assert "MUSIC_ARTIFACT_MAX_SIZE:${MUSIC_ARTIFACT_MAX_SIZE:-104857600}" in normalized
-    assert "COMPUTE_DEVICE:${COMPUTE_DEVICE:-cpu}" in normalized
-    assert "restart:unless-stopped" in normalized
-    assert "volumes:" in compose
-    assert "/var/lib/sensitive-checker/music" in compose
-    assert "/health/ready" in compose
-
-
-def test_gpu_compose_selects_cuda_runtime_and_all_gpus() -> None:
-    compose = compact(read("compose.gpu.yaml"))
-
-    assert "target:runtime-gpu" in compose
-    assert "COMPUTE_DEVICE:cuda" in compose
-    assert "gpus:all" in compose
