@@ -34,6 +34,17 @@ The safe default binds to `127.0.0.1:8000`. Check `GET /health/live` and `GET /h
 
 The music artifact limit is `104857600` bytes (100 MiB). Startup cleanup and the TTL sweeper remove stale jobs from `ARTIFACT_ROOT`.
 
+## Music fetch logs
+
+Running `python -m app` or either Docker runtime target enables INFO logs for the music-fetch lifecycle. Use the response `X-Request-ID` to correlate these stages:
+
+- `music_fetch_started`, `music_capacity_acquired`, `music_job_created`
+- `music_process_started`, `music_process_completed` or `music_process_failed`
+- `music_download_completed`, `music_metadata_started`, `music_metadata_completed`
+- `music_artifact_registered` or `music_provider_failed`
+
+Failed subprocess output is bounded and redacts access tokens, cookies, set-cookie, authorization headers, and sensitive header tuples. Commands and absolute artifact paths are not logged.
+
 ## CI/CD
 
 A push to `main` runs `.github/workflows/deploy.yml`. It publishes:
