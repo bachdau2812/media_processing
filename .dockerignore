@@ -1,0 +1,12 @@
+.git
+.gitignore
+.env
+.venv
+.pytest_cache
+.superpowers
+**/__pycache__
+**/*.py[cod]
+tests
+*.csv
+README.md
+compose*.yaml

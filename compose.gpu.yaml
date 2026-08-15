@@ -1,0 +1,7 @@
+services:
+  sensitive-checker:
+    build:
+      target: runtime-gpu
+    environment:
+      COMPUTE_DEVICE: cuda
+    gpus: all

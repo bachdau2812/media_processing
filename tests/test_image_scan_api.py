@@ -260,7 +260,9 @@ async def test_default_services_load_scanner_once_with_selected_device(
     monkeypatch.setattr(main_module, "select_device", fake_select_device)
     monkeypatch.setattr(main_module.NsfwChecker, "load", fake_load)
     settings = Settings(
-        compute_device="auto", image_scan_temp_root=tmp_path
+        compute_device="auto",
+        image_scan_temp_root=tmp_path / "images",
+        artifact_root=tmp_path / "music",
     )
     services = create_uninitialized_services()
     app = create_app(settings, services)

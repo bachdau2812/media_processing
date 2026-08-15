@@ -1,5 +1,6 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 import logging
@@ -15,7 +16,10 @@ from app.api.music_artifacts import MusicArtifactNotFound
 from app.api.music_artifacts import router as music_artifact_router
 from app.config import Settings
 from app.errors import ApiProblem
+from app.services.artifact_store import ArtifactStore
+from app.services.ffprobe_metadata import FfprobeMetadataReader
 from app.services.music_artifact_service import (
+    MusicArtifactService,
     MusicArtifactTooLarge,
     MusicCapacityExceeded,
     MusicFetchTimeout,
@@ -23,6 +27,11 @@ from app.services.music_artifact_service import (
 )
 from app.services.device import select_device
 from app.services.nsfw_checker import NsfwChecker
+from app.services.process_runner import ProcessRunner
+from app.services.spotiflac_downloader import SpotiFlacDownloader
+
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -36,15 +45,28 @@ def create_app(settings: Settings, services: Any) -> FastAPI:
         app.state.settings = settings
         app.state.services = services
         if getattr(services, "nsfw_checker", False) is None:
-            device = select_device(settings.compute_device)
-            services.device = device
-            services.nsfw_checker = await asyncio.to_thread(
-                NsfwChecker.load, settings, device
+            await _initialize_runtime_services(settings, services)
+        managed_runtime = getattr(services, "_managed_runtime", False)
+        cleanup_task = None
+        if managed_runtime:
+            services.ready = True
+            cleanup_task = asyncio.create_task(
+                _sweep_expired_artifacts(
+                    services.artifact_store,
+                    settings.music_cleanup_interval_seconds,
+                )
             )
-        async with _lifespan(app):
-            yield
+        try:
+            async with _lifespan(app):
+                yield
+        finally:
+            if managed_runtime:
+                services.ready = False
+            if cleanup_task is not None:
+                cleanup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cleanup_task
 
-    logger = logging.getLogger(__name__)
     app = FastAPI(lifespan=lifespan)
 
     @app.middleware("http")
@@ -145,6 +167,49 @@ def create_uninitialized_services() -> SimpleNamespace:
         device="uninitialized",
         nsfw_checker=None,
     )
+
+
+async def _initialize_runtime_services(settings: Settings, services: Any) -> None:
+    services.ready = False
+    device = select_device(settings.compute_device)
+    nsfw_checker = await asyncio.to_thread(NsfwChecker.load, settings, device)
+    artifact_store = await asyncio.to_thread(
+        ArtifactStore,
+        settings.artifact_root,
+        settings.music_artifact_max_size,
+        settings.music_artifact_ttl_seconds,
+        lambda: datetime.now(UTC),
+    )
+    await artifact_store.remove_stale_directories()
+    process_runner = ProcessRunner()
+    downloader = SpotiFlacDownloader(settings, process_runner)
+    metadata_reader = FfprobeMetadataReader(settings, process_runner)
+    music_artifact_service = MusicArtifactService(
+        settings,
+        downloader,
+        metadata_reader,
+        artifact_store,
+    )
+
+    services.device = device
+    services.nsfw_checker = nsfw_checker
+    services.artifact_store = artifact_store
+    services.music_artifact_service = music_artifact_service
+    services._managed_runtime = True
+    services.ready = True
+
+
+async def _sweep_expired_artifacts(
+    artifact_store: ArtifactStore, interval_seconds: int
+) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await artifact_store.sweep_expired()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to sweep expired music artifacts")
 
 
 def _problem_response(
