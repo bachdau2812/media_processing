@@ -18,6 +18,9 @@ _SENSITIVE_HEADER = re.compile(
 _SENSITIVE_HEADER_TUPLE = re.compile(
     r"(?i)\(b?'(set-cookie|cookie|authorization)',\s*b?'[^']*'\)"
 )
+_SENSITIVE_HEADER_TUPLE_TAIL = re.compile(
+    r"(?is)\(b?'(set-cookie|cookie|authorization)',\s*b?'.*\Z"
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,9 @@ class ProcessRunner:
         decoded = output.decode("utf-8", errors="replace")
         sanitized = _ACCESS_TOKEN.sub(r"\1[REDACTED]", decoded)
         sanitized = _SENSITIVE_HEADER_TUPLE.sub(
+            r"\1=[REDACTED]", sanitized
+        )
+        sanitized = _SENSITIVE_HEADER_TUPLE_TAIL.sub(
             r"\1=[REDACTED]", sanitized
         )
         sanitized = _SENSITIVE_HEADER.sub(r"\1=[REDACTED]", sanitized)

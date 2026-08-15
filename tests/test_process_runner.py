@@ -104,3 +104,28 @@ async def test_process_runner_redacts_tokens_cookies_and_authorization_headers()
         "tuple-secret",
     ):
         assert secret not in result.output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["authorization", "cookie"])
+async def test_process_runner_redacts_unterminated_sensitive_tuple_at_cap(
+    header: str,
+):
+    runner = ProcessRunner(max_output_bytes=64)
+    payload = (
+        "x" * 32
+        + f"(b'{header}', b'boundary-secret-that-extends-beyond-capture')"
+    )
+
+    result = await runner.run(
+        request_for(
+            sys.executable,
+            "-c",
+            f"import sys; sys.stdout.write({payload!r})",
+        )
+    )
+
+    assert result.exit_code == 0
+    assert "boundary" not in result.output
+    assert f"{header}=[REDACTED]" in result.output
+    assert len(result.output.encode("utf-8")) <= 64
