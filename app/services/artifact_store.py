@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shutil
 import stat
 from collections.abc import Callable
@@ -26,6 +27,31 @@ def require_beneath_root(root: Path, candidate: Path) -> Path:
     if not resolved.is_relative_to(root):
         raise ValueError("Artifact path escapes configured root")
     return resolved
+
+
+def _require_safe_components(
+    root: Path, candidate: Path, *, allow_missing: bool
+) -> Path:
+    absolute_candidate = Path(os.path.abspath(candidate))
+    try:
+        relative_candidate = absolute_candidate.relative_to(root)
+    except ValueError as error:
+        raise ValueError("Artifact path escapes configured root") from error
+
+    current = root
+    for component in relative_candidate.parts:
+        current /= component
+        try:
+            component_stat = current.lstat()
+        except FileNotFoundError:
+            if allow_missing:
+                break
+            raise
+        is_junction = getattr(current, "is_junction", lambda: False)()
+        if stat.S_ISLNK(component_stat.st_mode) or is_junction:
+            raise ValueError("Artifact path contains a symlink component")
+
+    return require_beneath_root(root, absolute_candidate)
 
 
 def _inspect_and_hash_file(path: Path, maximum_size_bytes: int) -> tuple[int, str]:
@@ -67,6 +93,53 @@ def _remove_directory(path: Path) -> None:
         pass
 
 
+def _register_file(
+    root: Path, candidate: Path, maximum_size_bytes: int
+) -> tuple[Path, int, str]:
+    resolved = _require_safe_components(root, candidate, allow_missing=False)
+    if resolved.parent == root:
+        raise ValueError("Artifact must be stored in a job directory")
+    size_bytes, sha256 = _inspect_and_hash_file(resolved, maximum_size_bytes)
+    return resolved, size_bytes, sha256
+
+
+def _get_file_size(root: Path, candidate: Path) -> int:
+    resolved = _require_safe_components(root, candidate, allow_missing=True)
+    return _validated_file_size(resolved)
+
+
+def _delete_artifact_directory(root: Path, candidate: Path) -> None:
+    resolved = _require_safe_components(root, candidate, allow_missing=True)
+    job_directory = resolved.parent
+    if job_directory == root:
+        raise ValueError("Refusing to delete artifact root")
+    _remove_directory(job_directory)
+
+
+def _remove_stale_job_directories(
+    root: Path, active_directories: set[Path]
+) -> int:
+    removed = 0
+    for candidate in list(root.iterdir()):
+        if candidate in active_directories:
+            continue
+        try:
+            candidate_stat = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        is_junction = getattr(candidate, "is_junction", lambda: False)()
+        if stat.S_ISLNK(candidate_stat.st_mode) or is_junction:
+            continue
+        if not stat.S_ISDIR(candidate_stat.st_mode):
+            continue
+        resolved = require_beneath_root(root, candidate)
+        if resolved == root:
+            continue
+        _remove_directory(resolved)
+        removed += 1
+    return removed
+
+
 class ArtifactStore:
     def __init__(
         self,
@@ -90,16 +163,11 @@ class ArtifactStore:
         metadata: MusicMetadata,
     ) -> ArtifactRecord:
         candidate = Path(file_path)
-        if candidate.is_symlink():
-            raise ValueError("Artifact must not be a symlink")
-        resolved = require_beneath_root(self._root, candidate)
-        if resolved.parent == self._root:
-            raise ValueError("Artifact must be stored in a job directory")
-
         try:
-            size_bytes, sha256 = await asyncio.to_thread(
-                _inspect_and_hash_file,
-                resolved,
+            resolved, size_bytes, sha256 = await asyncio.to_thread(
+                _register_file,
+                self._root,
+                candidate,
                 self._maximum_size_bytes,
             )
         except (FileNotFoundError, OSError) as error:
@@ -128,11 +196,10 @@ class ArtifactStore:
             await self.delete(record.artifact_id)
             return None
 
-        if record.file_path.is_symlink():
-            raise ValueError("Artifact must not be a symlink")
-        resolved = require_beneath_root(self._root, record.file_path)
         try:
-            size_bytes = await asyncio.to_thread(_validated_file_size, resolved)
+            size_bytes = await asyncio.to_thread(
+                _get_file_size, self._root, record.file_path
+            )
         except FileNotFoundError:
             return None
         except OSError as error:
@@ -147,15 +214,9 @@ class ArtifactStore:
         if record is None:
             return False
 
-        require_beneath_root(self._root, record.file_path)
-        job_directory = record.file_path.parent
-        if job_directory.is_symlink():
-            raise ValueError("Artifact path escapes configured root")
-        resolved_job_directory = require_beneath_root(self._root, job_directory)
-        if resolved_job_directory == self._root:
-            raise ValueError("Refusing to delete artifact root")
-
-        await asyncio.to_thread(_remove_directory, resolved_job_directory)
+        await asyncio.to_thread(
+            _delete_artifact_directory, self._root, record.file_path
+        )
         async with self._lock:
             if self._records.get(record.artifact_id) is record:
                 del self._records[record.artifact_id]
@@ -180,16 +241,8 @@ class ArtifactStore:
             active_directories = {
                 record.file_path.parent for record in self._records.values()
             }
-
-        removed = 0
-        for candidate in list(self._root.iterdir()):
-            if candidate in active_directories or candidate.is_symlink():
-                continue
-            if not candidate.is_dir():
-                continue
-            resolved = require_beneath_root(self._root, candidate)
-            if resolved == self._root:
-                continue
-            await asyncio.to_thread(_remove_directory, resolved)
-            removed += 1
-        return removed
+        return await asyncio.to_thread(
+            _remove_stale_job_directories,
+            self._root,
+            active_directories,
+        )

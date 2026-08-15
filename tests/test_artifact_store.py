@@ -1,4 +1,5 @@
 import hashlib
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -92,6 +93,23 @@ async def test_register_rejects_symlink(tmp_path: Path, clock):
 
 
 @pytest.mark.asyncio
+async def test_register_rejects_symlinked_job_directory_inside_root(
+    tmp_path: Path, clock
+):
+    root = tmp_path / "artifacts"
+    real_job = root / "real-job"
+    real_job.mkdir(parents=True)
+    audio = real_job / "song.flac"
+    audio.write_bytes(b"audio")
+    linked_job = root / "link-job"
+    symlink_or_skip(linked_job, real_job, target_is_directory=True)
+    store = ArtifactStore(root, 100 * 1024 * 1024, 900, clock)
+
+    with pytest.raises(ValueError, match="symlink"):
+        await store.register(TRACK_ID, linked_job / "song.flac", MusicMetadata())
+
+
+@pytest.mark.asyncio
 async def test_register_refuses_path_outside_artifact_root(tmp_path: Path, clock):
     root = tmp_path / "artifacts"
     root.mkdir()
@@ -139,12 +157,39 @@ async def test_delete_refuses_job_directory_replaced_with_outside_symlink(
     job.rmdir()
     symlink_or_skip(job, outside, target_is_directory=True)
 
-    with pytest.raises(ValueError, match="escapes configured root"):
+    with pytest.raises(ValueError, match="symlink"):
         await store.delete(record.artifact_id)
 
     assert protected_file.read_text() == "do not remove"
-    with pytest.raises(ValueError, match="escapes configured root"):
+    with pytest.raises(ValueError, match="symlink"):
         await store.get(record.artifact_id)
+
+
+@pytest.mark.asyncio
+async def test_get_and_delete_reject_job_directory_replaced_with_inside_symlink(
+    tmp_path: Path, clock
+):
+    root = tmp_path / "artifacts"
+    job = root / "job-1"
+    job.mkdir(parents=True)
+    audio = job / "song.flac"
+    audio.write_bytes(b"audio")
+    store = ArtifactStore(root, 100 * 1024 * 1024, 900, clock)
+    record = await store.register(TRACK_ID, audio, MusicMetadata())
+
+    audio.unlink()
+    job.rmdir()
+    replacement = root / "replacement"
+    replacement.mkdir()
+    replacement_audio = replacement / "song.flac"
+    replacement_audio.write_bytes(b"audio")
+    symlink_or_skip(job, replacement, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        await store.get(record.artifact_id)
+    with pytest.raises(ValueError, match="symlink"):
+        await store.delete(record.artifact_id)
+    assert replacement_audio.read_bytes() == b"audio"
 
 
 @pytest.mark.asyncio
@@ -212,3 +257,40 @@ async def test_remove_stale_directories_leaves_outside_symlink(
     assert await store.remove_stale_directories() == 0
     assert protected_file.read_text() == "do not remove"
     assert (root / "outside-link").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_work_runs_off_event_loop(tmp_path: Path, clock, monkeypatch):
+    root = tmp_path / "artifacts"
+    job = root / "job-1"
+    job.mkdir(parents=True)
+    audio = job / "song.flac"
+    audio.write_bytes(b"audio")
+    stale = root / "stale-job"
+    stale.mkdir()
+    (stale / "old.flac").write_bytes(b"old")
+    store = ArtifactStore(root, 100 * 1024 * 1024, 900, clock)
+    event_loop_thread = threading.get_ident()
+
+    with monkeypatch.context() as patcher:
+        for method_name in (
+            "is_dir",
+            "is_symlink",
+            "iterdir",
+            "lstat",
+            "open",
+            "resolve",
+            "stat",
+        ):
+            method = getattr(Path, method_name)
+
+            def require_worker_thread(self, *args, _method=method, **kwargs):
+                assert threading.get_ident() != event_loop_thread
+                return _method(self, *args, **kwargs)
+
+            patcher.setattr(Path, method_name, require_worker_thread)
+
+        record = await store.register(TRACK_ID, audio, MusicMetadata())
+        assert await store.get(record.artifact_id) == record
+        assert await store.delete(record.artifact_id)
+        assert await store.remove_stale_directories() == 1
