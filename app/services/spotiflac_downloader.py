@@ -72,6 +72,7 @@ class SpotiFlacDownloader:
             label="SpotiFLAC",
             track_id=track_id,
             job_id=job_directory.name,
+            stream_output=True,
         )
 
         process_task = asyncio.create_task(self._runner.run(request))

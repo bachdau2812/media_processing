@@ -43,7 +43,7 @@ Running `python -m app` or either Docker runtime target enables INFO logs for th
 - `music_download_completed`, `music_metadata_started`, `music_metadata_completed`
 - `music_artifact_registered` or `music_provider_failed`
 
-Failed subprocess output is bounded and redacts access tokens, cookies, set-cookie, authorization headers, and sensitive header tuples. Commands and absolute artifact paths are not logged.
+Every SpotiFLAC stdout/stderr record is also streamed at INFO by default as `music_process_output`, including carriage-return progress updates. Records are bounded to 64 KiB and redact access tokens, cookies, authorization and API-key headers, signed query credentials, provider credential fields, and client IP headers. Commands and absolute artifact paths are not logged. ffprobe JSON is captured for metadata parsing but is never streamed.
 
 ## CI/CD
 

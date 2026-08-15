@@ -29,6 +29,44 @@ class ProcessRequest:
     label: str
     track_id: str
     job_id: str
+    stream_output: bool = False
+
+
+class _StreamRecordFramer:
+    def __init__(self, maximum_bytes: int) -> None:
+        self._maximum_bytes = maximum_bytes
+        self._pending = bytearray()
+        self._discarding = False
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        records: list[bytes] = []
+        for value in chunk:
+            if value in (10, 13):
+                if not self._discarding and self._pending:
+                    records.append(bytes(self._pending))
+                self._pending.clear()
+                self._discarding = False
+                continue
+            if self._discarding:
+                continue
+            self._pending.append(value)
+            if len(self._pending) > self._maximum_bytes:
+                records.append(
+                    (
+                        "[TRUNCATED: record exceeded "
+                        f"{self._maximum_bytes} bytes]"
+                    ).encode("ascii")
+                )
+                self._pending.clear()
+                self._discarding = True
+        return records
+
+    def finish(self) -> list[bytes]:
+        if self._discarding or not self._pending:
+            return []
+        record = bytes(self._pending)
+        self._pending.clear()
+        return [record]
 
 
 class ProcessRunner:
@@ -62,7 +100,9 @@ class ProcessRunner:
             env=environment,
             **process_options,
         )
-        output_task = asyncio.create_task(self._read_output(process))
+        output_task = asyncio.create_task(
+            self._read_output(process, request)
+        )
         try:
             try:
                 await asyncio.wait_for(
@@ -132,15 +172,55 @@ class ProcessRunner:
             if not output_task.done():
                 output_task.cancel()
 
-    async def _read_output(self, process: asyncio.subprocess.Process) -> bytes:
+    async def _read_output(
+        self,
+        process: asyncio.subprocess.Process,
+        request: ProcessRequest,
+    ) -> bytes:
         if process.stdout is None:
             return b""
         captured = bytearray()
-        while chunk := await process.stdout.read(_READ_CHUNK_BYTES):
-            remaining = self._max_output_bytes - len(captured)
-            if remaining > 0:
-                captured.extend(chunk[:remaining])
+        framer = (
+            _StreamRecordFramer(self._max_output_bytes)
+            if request.stream_output
+            else None
+        )
+        try:
+            while chunk := await process.stdout.read(_READ_CHUNK_BYTES):
+                remaining = self._max_output_bytes - len(captured)
+                if remaining > 0:
+                    captured.extend(chunk[:remaining])
+                if framer is not None:
+                    for record in framer.feed(chunk):
+                        self._log_process_output(request, record)
+        finally:
+            if framer is not None:
+                for record in framer.finish():
+                    self._log_process_output(request, record)
         return bytes(captured)
+
+    def _log_process_output(
+        self,
+        request: ProcessRequest,
+        record: bytes,
+    ) -> None:
+        try:
+            safe_line = sanitize_log_text(record, self._max_output_bytes)
+            logger.info(
+                "music_process_output label=%s track_id=%s job_id=%s line=%r",
+                request.label,
+                request.track_id,
+                request.job_id,
+                safe_line,
+            )
+        except Exception:
+            logger.warning(
+                "music_process_output_logging_failed label=%s track_id=%s "
+                "job_id=%s",
+                request.label,
+                request.track_id,
+                request.job_id,
+            )
 
     async def _terminate(self, process: asyncio.subprocess.Process) -> None:
         if process.returncode is not None:

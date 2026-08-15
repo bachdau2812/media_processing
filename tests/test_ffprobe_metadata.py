@@ -74,6 +74,7 @@ async def test_ffprobe_reads_mixed_case_metadata_tags(tmp_path: Path):
             job_id="job-id",
         )
     ]
+    assert getattr(runner.requests[0], "stream_output", None) is False
 
 
 @pytest.mark.asyncio

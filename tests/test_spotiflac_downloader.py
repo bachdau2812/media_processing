@@ -93,6 +93,7 @@ async def test_download_runs_exact_spotiflac_command(tmp_path: Path):
     assert captured_request.label == "SpotiFLAC"
     assert captured_request.track_id == TRACK_ID
     assert captured_request.job_id == job_dir.name
+    assert getattr(captured_request, "stream_output", None) is True
 
 
 @pytest.mark.asyncio
