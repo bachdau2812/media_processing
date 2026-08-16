@@ -8,3 +8,4 @@ ultralytics==8.4.67
 transformers==5.12.0
 spotiflac==1.6.0
 aiofiles==25.1.0
+pydoll-python==2.23.1
