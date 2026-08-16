@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -275,3 +276,107 @@ async def test_default_services_load_scanner_once_with_selected_device(
 
     assert selected_devices == ["auto"]
     assert load_calls == [(settings, torch.device("cpu"))]
+
+
+def test_nsfw_checker_logs_safe_scan_stages_and_result(tmp_path: Path, caplog):
+    service = checker(
+        {"porn": 0.1, "hentai": 0.1, "sexy": 0.2, "neutral": 0.6},
+        FakeYolo(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.services.nsfw_checker"):
+        service.evaluate(image_file(tmp_path))
+
+    messages = "\n".join(caplog.messages)
+    assert "image_scan_started" in messages
+    assert "image_vit_scan_started" in messages
+    assert "image_vit_scores" in messages
+    assert "porn=0.1000" in messages
+    assert "neutral=0.6000" in messages
+    assert "image_yolo_scan_started" in messages
+    assert "image_yolo_no_detections" in messages
+    assert "image_scan_decision" in messages
+    assert "reason=safe_neutral" in messages
+    assert "image_scan_completed" in messages
+    assert "elapsed_ms=" in messages
+
+
+def test_nsfw_checker_logs_vit_hard_block_and_completion(tmp_path: Path, caplog):
+    service = checker(
+        {"porn": 0.61, "hentai": 0.01, "sexy": 0.18, "neutral": 0.2},
+        FakeYolo(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.services.nsfw_checker"):
+        service.evaluate(image_file(tmp_path))
+
+    messages = "\n".join(caplog.messages)
+    assert "image_vit_hard_block" in messages
+    assert "reason=global_porn_or_hentai_detected" in messages
+    assert "image_scan_completed" in messages
+    assert "image_yolo_scan_started" not in messages
+
+
+def test_nsfw_checker_logs_yolo_detections_and_banned_label(
+    tmp_path: Path,
+    caplog,
+):
+    service = checker(
+        {"porn": 0.1, "hentai": 0.1, "sexy": 0.2, "neutral": 0.6},
+        FakeYolo([FakeBox(1, 0.7), FakeBox(0, 0.8)]),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.services.nsfw_checker"):
+        service.evaluate(image_file(tmp_path))
+
+    messages = "\n".join(caplog.messages)
+    assert "image_yolo_detection part=face confidence=0.7000" in messages
+    assert "image_yolo_detection part=nipple confidence=0.8000" in messages
+    assert "image_yolo_banned_label part=nipple" in messages
+    assert "reason=yolo_detected_banned_parts" in messages
+
+
+def test_nsfw_checker_logs_invalid_image_without_temporary_path(
+    tmp_path: Path,
+    caplog,
+):
+    invalid_image = tmp_path / "broken.jpg"
+    invalid_image.write_bytes(b"not-an-image")
+    service = checker(
+        {"porn": 0.1, "hentai": 0.1, "sexy": 0.2, "neutral": 0.6},
+        FakeYolo(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.services.nsfw_checker"):
+        service.evaluate(invalid_image)
+
+    messages = "\n".join(caplog.messages)
+    assert "image_scan_invalid_image" in messages
+    assert "image_scan_completed status=error reason=invalid_image" in messages
+    assert "elapsed_ms=" in messages
+    assert str(invalid_image.resolve()) not in messages
+
+
+@pytest.mark.asyncio
+async def test_image_api_logs_upload_scan_and_cleanup_without_path_leak(
+    tmp_path: Path,
+    caplog,
+):
+    scanner = FakeScanner()
+    app = create_app(
+        Settings(image_scan_temp_root=tmp_path),
+        services(scanner),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.api.image_scan"):
+        response = await post_image(app, "photo\nforged.jpg", b"small-image")
+
+    assert response.status_code == 200
+    messages = "\n".join(caplog.messages)
+    assert "image_upload_received" in messages
+    assert "filename='photo%0Aforged.jpg'" in messages
+    assert "photo\nforged.jpg" not in messages
+    assert "image_upload_completed size_bytes=11" in messages
+    assert "image_api_scan_completed status=success reason=safe_neutral" in messages
+    assert "image_temp_cleanup_completed" in messages
+    assert str(tmp_path.resolve()) not in messages
