@@ -1,75 +1,156 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.12-slim-bookworm AS base
+FROM python:3.12-slim-bookworm AS runtime-cpu
 
+
+# ==========================================
+# ENVIRONMENT
+# ==========================================
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    HF_HOME=/opt/huggingface
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/opt/huggingface \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    TOKENIZERS_PARALLELISM=false \
+    SERVICE_HOST=127.0.0.1 \
+    SERVICE_PORT=8000 \
+    COMPUTE_DEVICE=cpu \
+    LOG_DIR=/srv/app/logs
 
+
+# ==========================================
+# SYSTEM DEPENDENCIES
+# ==========================================
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
         ffmpeg \
         libgl1 \
         libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+
+# ==========================================
+# APPLICATION USER + DIRECTORIES
+# ==========================================
+RUN groupadd --gid 10001 app \
+    && useradd \
+        --uid 10001 \
+        --gid 10001 \
+        --create-home \
+        --shell /usr/sbin/nologin \
+        app \
+    && mkdir -p \
+        /srv/app \
+        /srv/app/logs \
+        /srv/app/models \
+        /opt/huggingface \
+        /var/lib/sensitive-checker/music \
+        /tmp/sensitive-checker/images \
+    && chown -R app:app \
+        /srv/app \
+        /opt/huggingface \
+        /var/lib/sensitive-checker \
+        /tmp/sensitive-checker
+
 
 WORKDIR /srv/app
 
-FROM base AS dependencies-common
 
-COPY requirements.txt ./requirements.txt
-RUN python -m pip install --no-cache-dir -r requirements.txt
+# ==========================================
+# PYTHON DEPENDENCIES
+# ==========================================
 
-FROM dependencies-common AS dependencies-cpu
+# requirements-cpu.txt:
+#
+# --index-url https://download.pytorch.org/whl/cpu
+# torch==2.11.0
+# torchvision==0.26.0
 
 COPY requirements-cpu.txt ./requirements-cpu.txt
-RUN python -m pip install --no-cache-dir --force-reinstall -r requirements-cpu.txt \
-    && python -c "from transformers import ViTForImageClassification, ViTImageProcessor; name='AdamCodd/vit-base-nsfw-detector'; ViTImageProcessor.from_pretrained(name); ViTForImageClassification.from_pretrained(name)"
+COPY requirements.txt ./requirements.txt
 
-FROM dependencies-common AS dependencies-gpu
+# Torch CPU phải được cài TRƯỚC Ultralytics.
+#
+# Dùng cùng một RUN để nếu pip có thay đổi/reconcile package,
+# image không giữ một layer package cũ riêng phía dưới.
+RUN python -m pip install \
+        --no-cache-dir \
+        -r requirements-cpu.txt \
+    && python -m pip install \
+        --no-cache-dir \
+        -r requirements.txt \
+    && python -m pip check \
+    && python -c "\
+import torch; \
+print('Torch version:', torch.__version__); \
+print('CUDA version:', torch.version.cuda); \
+assert torch.version.cuda is None, 'GPU/CUDA Torch installed in CPU image'; \
+print('CPU-only PyTorch verified')"
 
-COPY requirements-gpu.txt ./requirements-gpu.txt
-RUN python -m pip install --no-cache-dir --force-reinstall -r requirements-gpu.txt \
-    && python -c "from transformers import ViTForImageClassification, ViTImageProcessor; name='AdamCodd/vit-base-nsfw-detector'; ViTImageProcessor.from_pretrained(name); ViTForImageClassification.from_pretrained(name)"
 
-FROM dependencies-cpu AS runtime-cpu
+# ==========================================
+# HUGGING FACE MODEL
+# ==========================================
 
-RUN groupadd --gid 10001 app \
-    && useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app \
-    && mkdir -p /var/lib/sensitive-checker/music /tmp/sensitive-checker/images /srv/app/logs \
-    && chown -R app:app /var/lib/sensitive-checker /tmp/sensitive-checker /srv/app/logs \
-    && chmod -R a+rX /opt/huggingface
+# Download model ngay lúc build để runtime có thể chạy offline.
+# Chạy bằng user app để cache có đúng ownership ngay từ đầu,
+# không phải chmod/chown recursive ở layer sau.
+USER app
+
+RUN python -c "\
+from transformers import ViTForImageClassification, ViTImageProcessor; \
+name='AdamCodd/vit-base-nsfw-detector'; \
+print(f'Downloading Hugging Face model: {name}'); \
+ViTImageProcessor.from_pretrained(name); \
+ViTForImageClassification.from_pretrained(name); \
+print('Hugging Face model downloaded successfully')"
+
+
+# ==========================================
+# APPLICATION SOURCE
+# ==========================================
+
+USER root
+
 COPY --chown=app:app app ./app
 COPY --chown=app:app spotiflac ./spotiflac
-COPY --chown=app:app models/erax_nsfw_yolo11m.pt ./models/erax_nsfw_yolo11m.pt
 
-ENV LOG_DIR=/srv/app/logs \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1
+COPY --chown=app:app \
+    models/erax_nsfw_yolo11m.pt \
+    ./models/erax_nsfw_yolo11m.pt
+
+
+# ==========================================
+# RUNTIME
+# ==========================================
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    ARTIFACT_ROOT=/var/lib/sensitive-checker/music \
+    IMAGE_SCAN_TEMP_ROOT=/tmp/sensitive-checker/images \
+    YOLO_MODEL_PATH=/srv/app/models/erax_nsfw_yolo11m.pt \
+    VIT_MODEL_NAME=AdamCodd/vit-base-nsfw-detector
+
+
 USER app
+
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+
+
+# ==========================================
+# HEALTHCHECK
+# ==========================================
+HEALTHCHECK \
+    --interval=30s \
+    --timeout=5s \
+    --start-period=60s \
+    --retries=3 \
     CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('SERVICE_PORT', '8000') + '/health/ready', timeout=3)"]
-CMD ["python", "-m", "app"]
 
-FROM dependencies-gpu AS runtime-gpu
 
-RUN groupadd --gid 10001 app \
-    && useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app \
-    && mkdir -p /var/lib/sensitive-checker/music /tmp/sensitive-checker/images /srv/app/logs \
-    && chown -R app:app /var/lib/sensitive-checker /tmp/sensitive-checker /srv/app/logs \
-    && chmod -R a+rX /opt/huggingface
-COPY --chown=app:app app ./app
-COPY --chown=app:app spotiflac ./spotiflac
-COPY --chown=app:app models/erax_nsfw_yolo11m.pt ./models/erax_nsfw_yolo11m.pt
-
-ENV LOG_DIR=/srv/app/logs \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1
-USER app
-EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('SERVICE_PORT', '8000') + '/health/ready', timeout=3)"]
+# ==========================================
+# START APPLICATION
+# ==========================================
 CMD ["python", "-m", "app"]
