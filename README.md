@@ -36,7 +36,7 @@ The music artifact limit is `104857600` bytes (100 MiB). Startup cleanup and the
 
 ## Service logs
 
-All application, Uvicorn, image-scan, and SpotiFLAC events are written to both the console and `./logs/log-<port>.log` by default. Set `LOG_DIR` to use another directory. The active file rolls at local midnight or when it exceeds 100 MiB; archives are gzip-compressed, limited to 30 files, and removed after 14 days.
+All application, Uvicorn, image-scan, and SpotiFLAC events are written to both the console and `./logs/media_processing.log` by default. Set `LOG_DIR` to use another directory. The active file rolls at local midnight or when it exceeds 100 MiB; archives are gzip-compressed, limited to 30 files, and removed after 14 days.
 
 For a container, mount `/srv/app/logs` when logs must survive recreation:
 
