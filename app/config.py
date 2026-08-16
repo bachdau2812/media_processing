@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     service_host: str = "127.0.0.1"
     service_port: PositiveInt = 8000
+    log_dir: Path = Path("logs")
     compute_device: Literal["cpu", "cuda", "auto"] = "cpu"
     artifact_root: Path = Path("/var/lib/sensitive-checker/music")
     music_artifact_max_size: PositiveInt = 100 * 1024 * 1024

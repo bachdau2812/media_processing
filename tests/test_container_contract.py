@@ -35,6 +35,8 @@ def test_dockerfile_provides_cpu_and_gpu_runtime_contracts() -> None:
         dockerfile,
     )
     assert "USER app" in dockerfile
+    assert "/srv/app/logs" in dockerfile
+    assert "LOG_DIR=/srv/app/logs" in dockerfile
     assert '["python","-m","app"]' in normalized
     assert "urllib.request" in dockerfile
     assert "curl" not in dockerfile.lower()
@@ -59,3 +61,4 @@ def test_entrypoint_uses_configured_host_and_one_worker() -> None:
 
     assert "host=settings.service_host" in compact(entrypoint)
     assert "workers=1" in compact(entrypoint)
+    assert "log_config=None" in compact(entrypoint)

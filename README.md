@@ -34,6 +34,20 @@ The safe default binds to `127.0.0.1:8000`. Check `GET /health/live` and `GET /h
 
 The music artifact limit is `104857600` bytes (100 MiB). Startup cleanup and the TTL sweeper remove stale jobs from `ARTIFACT_ROOT`.
 
+## Service logs
+
+All application, Uvicorn, image-scan, and SpotiFLAC events are written to both the console and `./logs/log-<port>.log` by default. Set `LOG_DIR` to use another directory. The active file rolls at local midnight or when it exceeds 100 MiB; archives are gzip-compressed, limited to 30 files, and removed after 14 days.
+
+For a container, mount `/srv/app/logs` when logs must survive recreation:
+
+```bash
+docker run --rm --network host \
+  -v /data/media-processing/logs:/srv/app/logs \
+  media_processing:local
+```
+
+The container runs as the non-root `app` user, so the host directory must be writable by UID/GID `10001`.
+
 ## Music fetch logs
 
 Running `python -m app` or either Docker runtime target enables INFO logs for the music-fetch lifecycle. Use the response `X-Request-ID` to correlate these stages:

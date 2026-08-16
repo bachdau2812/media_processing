@@ -38,14 +38,15 @@ FROM dependencies-cpu AS runtime-cpu
 
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app \
-    && mkdir -p /var/lib/sensitive-checker/music /tmp/sensitive-checker/images \
-    && chown -R app:app /var/lib/sensitive-checker /tmp/sensitive-checker \
+    && mkdir -p /var/lib/sensitive-checker/music /tmp/sensitive-checker/images /srv/app/logs \
+    && chown -R app:app /var/lib/sensitive-checker /tmp/sensitive-checker /srv/app/logs \
     && chmod -R a+rX /opt/huggingface
 COPY --chown=app:app app ./app
 COPY --chown=app:app spotiflac ./spotiflac
 COPY --chown=app:app models/erax_nsfw_yolo11m.pt ./models/erax_nsfw_yolo11m.pt
 
-ENV HF_HUB_OFFLINE=1 \
+ENV LOG_DIR=/srv/app/logs \
+    HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 USER app
 EXPOSE 8000
@@ -57,14 +58,15 @@ FROM dependencies-gpu AS runtime-gpu
 
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app \
-    && mkdir -p /var/lib/sensitive-checker/music /tmp/sensitive-checker/images \
-    && chown -R app:app /var/lib/sensitive-checker /tmp/sensitive-checker \
+    && mkdir -p /var/lib/sensitive-checker/music /tmp/sensitive-checker/images /srv/app/logs \
+    && chown -R app:app /var/lib/sensitive-checker /tmp/sensitive-checker /srv/app/logs \
     && chmod -R a+rX /opt/huggingface
 COPY --chown=app:app app ./app
 COPY --chown=app:app spotiflac ./spotiflac
 COPY --chown=app:app models/erax_nsfw_yolo11m.pt ./models/erax_nsfw_yolo11m.pt
 
-ENV HF_HUB_OFFLINE=1 \
+ENV LOG_DIR=/srv/app/logs \
+    HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 USER app
 EXPOSE 8000
