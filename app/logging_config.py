@@ -128,7 +128,7 @@ def configure_logging(settings: Settings | None = None) -> None:
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setFormatter(formatter)
     file_handler = CombinedRotatingFileHandler(
-        log_dir / "media_processing.log"
+        log_dir / f"log-{resolved_settings.service_port}.log"
     )
     file_handler.setFormatter(formatter)
     new_handlers: tuple[logging.Handler, ...] = (

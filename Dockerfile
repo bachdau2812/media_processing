@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.12-slim-bookworm AS runtime-cpu
+FROM python:3.12-slim-bookworm AS runtime-base
 
 
 # ==========================================
@@ -15,7 +15,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     TOKENIZERS_PARALLELISM=false \
     SERVICE_HOST=127.0.0.1 \
     SERVICE_PORT=8000 \
-    COMPUTE_DEVICE=cpu \
     LOG_DIR=/srv/app/logs
 
 
@@ -57,6 +56,11 @@ RUN groupadd --gid 10001 app \
 
 
 WORKDIR /srv/app
+
+
+FROM runtime-base AS runtime-cpu
+
+ENV COMPUTE_DEVICE=cpu
 
 
 # ==========================================
@@ -118,9 +122,7 @@ USER root
 COPY --chown=app:app app ./app
 COPY --chown=app:app spotiflac ./spotiflac
 
-COPY --chown=app:app \
-    models/erax_nsfw_yolo11m.pt \
-    ./models/erax_nsfw_yolo11m.pt
+COPY --chown=app:app models/erax_nsfw_yolo11m.pt ./models/erax_nsfw_yolo11m.pt
 
 
 # ==========================================
@@ -153,4 +155,79 @@ HEALTHCHECK \
 # ==========================================
 # START APPLICATION
 # ==========================================
+CMD ["python", "-m", "app"]
+
+
+FROM runtime-base AS runtime-gpu
+
+ENV COMPUTE_DEVICE=cuda
+
+
+# ==========================================
+# PYTHON DEPENDENCIES
+# ==========================================
+COPY requirements-gpu.txt ./requirements-gpu.txt
+COPY requirements.txt ./requirements.txt
+
+# Keep the CUDA-enabled PyTorch wheel before Ultralytics resolves its dependencies.
+RUN python -m pip install \
+        --no-cache-dir \
+        -r requirements-gpu.txt \
+    && python -m pip install \
+        --no-cache-dir \
+        -r requirements.txt \
+    && python -m pip check \
+    && python -c "\
+import torch; \
+print('Torch version:', torch.__version__); \
+print('CUDA version:', torch.version.cuda); \
+assert torch.version.cuda is not None, 'CPU-only PyTorch installed in GPU image'; \
+print('CUDA-enabled PyTorch verified')"
+
+
+# ==========================================
+# HUGGING FACE MODEL
+# ==========================================
+USER app
+
+RUN python -c "\
+from transformers import ViTForImageClassification, ViTImageProcessor; \
+name='AdamCodd/vit-base-nsfw-detector'; \
+print(f'Downloading Hugging Face model: {name}'); \
+ViTImageProcessor.from_pretrained(name); \
+ViTForImageClassification.from_pretrained(name); \
+print('Hugging Face model downloaded successfully')"
+
+
+# ==========================================
+# APPLICATION SOURCE
+# ==========================================
+USER root
+
+COPY --chown=app:app app ./app
+COPY --chown=app:app spotiflac ./spotiflac
+COPY --chown=app:app models/erax_nsfw_yolo11m.pt ./models/erax_nsfw_yolo11m.pt
+
+
+# ==========================================
+# RUNTIME
+# ==========================================
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    ARTIFACT_ROOT=/var/lib/sensitive-checker/music \
+    IMAGE_SCAN_TEMP_ROOT=/tmp/sensitive-checker/images \
+    YOLO_MODEL_PATH=/srv/app/models/erax_nsfw_yolo11m.pt \
+    VIT_MODEL_NAME=AdamCodd/vit-base-nsfw-detector
+
+USER app
+
+EXPOSE 8000
+
+HEALTHCHECK \
+    --interval=30s \
+    --timeout=5s \
+    --start-period=60s \
+    --retries=3 \
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('SERVICE_PORT', '8000') + '/health/ready', timeout=3)"]
+
 CMD ["python", "-m", "app"]
